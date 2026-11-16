@@ -3,7 +3,7 @@ import { mkdtemp, rm, writeFile } from 'node:fs/promises';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import test from 'node:test';
-import { openDatabase } from '../src/database.js';
+import { openDatabase, readDatabase, writeDatabase } from '../src/database.js';
 import { Metrics } from '../src/metrics.js';
 import { queryDatabases } from '../src/query.js';
 
@@ -18,10 +18,10 @@ test('a deleted file cannot reuse loaded data, and a failed race drains the othe
   ];
   const filenames = documents.map((_, index) => join(directory, `db${index + 1}.json`));
   for (const [index, document] of documents.entries()) {
-    await openDatabase(filenames[index], `db${index + 1}`, metrics, document).db.write();
+    await writeDatabase(openDatabase(filenames[index], `db${index + 1}`, metrics, document));
   }
   const readers = filenames.map((filename, index) => openDatabase(filename, `db${index + 1}`, metrics));
-  await Promise.all(readers.map(({ db }) => db.read()));
+  await Promise.all(readers.map(reader => readDatabase(reader)));
   assert.deepEqual(readers.map(({ db }) => db.data), documents);
   await rm(filenames[0]);
 
@@ -78,8 +78,8 @@ test('a null JSON document cannot reuse a prior successful lowdb read', async (t
   const filename = join(directory, 'db1.json');
   await writeFile(filename, JSON.stringify({ random: { records: [{ key: 1 }] }, hamming: { records: [] } }));
   const reader = openDatabase(filename, 'db1', metrics);
-  await reader.db.read();
+  await readDatabase(reader);
   await writeFile(filename, 'null');
-  await assert.rejects(reader.db.read(), Error);
+  await assert.rejects(readDatabase(reader), Error);
   assert.equal(metrics.databases.db1.load.calls, 2);
 });

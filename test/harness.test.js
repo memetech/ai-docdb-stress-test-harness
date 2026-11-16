@@ -25,13 +25,29 @@ test('default 10 MiB documents: all 205 sampled cross-file queries execute and p
     for (const document of report.documents) {
       assert.equal(document.randomBytes, 5 * 1024 * 1024);
       assert.equal(document.hammingBytes, 5 * 1024 * 1024);
+      assert.equal(document.randomRecords, 1024);
+      assert.equal(document.hammingRecords, 1024);
       assert.equal(document.fileBytes, (await stat(document.filename)).size);
       assert.ok(document.fileBytes > 10 * 1024 * 1024);
       const io = report.measurements.databases[document.database];
       assert.equal(io.load.calls, 206); // one fresh load plus one per query
       assert.equal(io.save.calls, 1);
-      assert.equal(io.load.bytes, 206 * document.fileBytes);
-      assert.equal(io.save.bytes, document.fileBytes);
+      assert.equal(io.load.fileBytes, 206 * document.fileBytes);
+      assert.equal(io.save.fileBytes, document.fileBytes);
+    }
+    const traversal = report.queries.traversal;
+    assert.equal(traversal.steps,
+      report.queries.results.reduce((sum, result) => sum + result.traversal.steps, 0));
+    assert.equal(traversal.databaseSwitches,
+      report.queries.results.reduce((sum, result) => sum + result.traversal.databaseSwitches, 0));
+    assert.ok(traversal.databaseSwitches > report.queries.selected);
+    for (const document of report.documents) {
+      for (const section of ['random', 'hamming']) {
+        assert.equal(traversal.visits[document.database][section],
+          report.queries.results.reduce((sum, result) =>
+            sum + result.traversal.visits[document.database][section], 0));
+        assert.ok(traversal.visits[document.database][section] > 0);
+      }
     }
     assert.ok(report.measurements.samples.length > 205);
     assert.ok(report.measurements.memory.peak.rss > 0);

@@ -39,6 +39,7 @@ function randomDigits(length, random) {
 function cyclicPayload(cycle, start, length) {
   if (length === 0) return '';
   const offset = start % cycle.length;
+  if (offset + length <= cycle.length) return cycle.slice(offset, offset + length);
   return cycle.repeat(Math.ceil((length + offset) / cycle.length))
     .slice(offset, offset + length);
 }
@@ -60,7 +61,8 @@ function fillSection(section, targetBytes, payload) {
 /**
  * Each JSON section occupies exactly sectionBytes. Records are ordered by key;
  * Gray-code values follow their rank, since sorting the values would break the
- * minimum-distance cycle. Opposite Hamming ownership forces cross-file pairs.
+ * minimum-distance cycle. Both files contain half of one shared cycle, with
+ * alternating rank ownership. Opposite Hamming ownership forces cross-file pairs.
  */
 export function generateDocument({
   databaseIndex,
@@ -83,31 +85,36 @@ export function generateDocument({
   }
 
   const random = makeRandom((seed ^ Math.imul(databaseIndex + 1, 0x9e3779b1)) >>> 0);
-  const cycleBits = Math.log2(records);
-  const rotation = databaseIndex % cycleBits;
+  const globalCycleLength = records * 2;
+  const cycleBits = Math.log2(globalCycleLength);
+  const rotation = (seed >>> 0) % cycleBits;
+  const rankParity = 1 - databaseIndex;
   const randomRecords = [];
   const hammingRecords = [];
-  for (let rank = 0; rank < records; rank += 1) {
+  for (let index = 0; index < records; index += 1) {
     randomRecords.push({
-      key: (2 * rank + databaseIndex) * KEY_STRIDE
+      key: (2 * index + databaseIndex) * KEY_STRIDE
         + Math.floor(random() * (KEY_STRIDE - 2)),
       payload: '',
     });
+    const rank = 2 * index + rankParity;
     hammingRecords.push({
-      key: (2 * rank + 1 - databaseIndex) * KEY_STRIDE + KEY_STRIDE - 2,
+      key: (rank + 1) * KEY_STRIDE - 2,
       rank,
       value: rotate(rank ^ (rank >>> 1), rotation, cycleBits),
       payload: '',
     });
   }
-  const cycle = hammingRecords.map(({ value }) => value.toString(2).padStart(cycleBits, '0')).join('');
+  const cycle = Array.from({ length: globalCycleLength }, (_, rank) =>
+    rotate(rank ^ (rank >>> 1), rotation, cycleBits).toString(2).padStart(cycleBits, '0')).join('');
   const randomSection = fillSection({ records: randomRecords }, sectionBytes,
     (length) => randomDigits(length, random));
-  const hammingSection = fillSection({ cycleBits, rotation, records: hammingRecords }, sectionBytes,
-    (length, index) => cyclicPayload(cycle, index * cycleBits, length));
+  const hammingSection = fillSection({
+    cycleBits, rotation, globalCycleLength, rankParity, records: hammingRecords,
+  }, sectionBytes, (length, index) => cyclicPayload(cycle, hammingRecords[index].rank * cycleBits, length));
 
   return {
-    formatVersion: 1,
+    formatVersion: 2,
     database: `db${databaseIndex + 1}`,
     recordsPerSection: records,
     sectionBytes,

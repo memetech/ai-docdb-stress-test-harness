@@ -4,7 +4,7 @@ import { mkdir, mkdtemp, stat, writeFile } from 'node:fs/promises';
 import { resolve, join } from 'node:path';
 import { performance } from 'node:perf_hooks';
 import { generateDocument, makeRandom, DEFAULT_SECTION_BYTES, DEFAULT_RECORDS } from './data.js';
-import { openDatabase } from './database.js';
+import { openDatabase, readDatabase, writeDatabase } from './database.js';
 import { Metrics } from './metrics.js';
 import { createReference, queryDatabases, sampleBoundaries } from './query.js';
 
@@ -31,12 +31,13 @@ export async function runHarness({
   const boundaries = sampleBoundaries(records, sampleRate, makeRandom(seed));
   const report = {
     status: 'failed', directory, reportPath,
-    configuration: { recordsPerSection: records, sectionBytes, sampleRate, seed, sampleIntervalMs },
+    configuration: { adapter: 'JSONFile', recordsPerSection: records, sectionBytes, sampleRate, seed, sampleIntervalMs },
     documents: [],
     queries: {
       population: records * 2, selected: boundaries.length,
       attempted: 0, completed: 0, passed: 0, failed: 0,
       crossDatabasePairs: 0, results: [],
+      traversal: { steps: 0, databaseSwitches: 0, visits: {} },
     },
   };
   metrics.start();
@@ -50,11 +51,13 @@ export async function runHarness({
       for (const document of documents) {
         const filename = join(directory, `${document.database}.json`);
         const writer = openDatabase(filename, document.database, metrics, document);
-        await writer.db.write();
+        await writeDatabase(writer);
         report.documents.push({
           database: document.database, filename, fileBytes: (await stat(filename)).size,
           randomBytes: Buffer.byteLength(JSON.stringify(document.random)),
           hammingBytes: Buffer.byteLength(JSON.stringify(document.hamming)),
+          randomRecords: document.random.records.length,
+          hammingRecords: document.hamming.records.length,
           sha256: digests[report.documents.length],
         });
       }
@@ -65,7 +68,7 @@ export async function runHarness({
       openDatabase(document.filename, document.database, metrics));
     await metrics.stage('reload', async () => {
       const results = await Promise.allSettled(readers.map(async (reader, index) => {
-        await reader.db.read();
+        await readDatabase(reader);
         assert.equal(digest(reader.db.data), digests[index], `${reader.name}: round-trip mismatch`);
       }));
       const errors = results.filter(result => result.status === 'rejected').map(result => result.reason);
@@ -78,6 +81,14 @@ export async function runHarness({
         let result;
         try {
           result = await queryDatabases(readers, boundary, metrics);
+          const totals = report.queries.traversal;
+          totals.steps += result.traversal.steps;
+          totals.databaseSwitches += result.traversal.databaseSwitches;
+          for (const [name, visits] of Object.entries(result.traversal.visits)) {
+            const target = totals.visits[name] ??= { random: 0, hamming: 0 };
+            target.random += visits.random;
+            target.hamming += visits.hamming;
+          }
           assert.deepEqual(result.pair, expected[index], `Incorrect pair at boundary ${boundary}`);
           assert.ok(result.pair, `Missing pair at boundary ${boundary}`);
           assert.notEqual(result.pair.random.database, result.pair.hamming.database,

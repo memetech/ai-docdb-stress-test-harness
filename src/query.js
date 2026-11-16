@@ -1,25 +1,22 @@
 import { KEY_STRIDE } from './data.js';
+import { readDatabase } from './database.js';
 
-// All raced work is drained, including failures: a fast file is not necessarily
-// the file containing the global predecessor or its nearest Hamming floor.
+// All raced loads are drained, including failures. The ordered query then
+// consumes four cursors across both loaded databases instead of scanning each
+// file as a block. Traversal switches below are in memory, not extra file reads.
 export async function queryDatabases(databases, boundary, metrics) {
   if (databases.length !== 2 || !Number.isSafeInteger(boundary)) {
     throw new TypeError('A query requires two databases and an integer boundary');
   }
   metrics?.raceStarted();
   try {
-    const work = databases.map(async ({ name, db }) => {
-      await db.read();
+    const work = databases.map(async database => {
+      const { name, db } = database;
+      await readDatabase(database);
       if (!db.data?.random?.records || !db.data?.hamming?.records) {
         throw new Error(`${name}: missing distributions`);
       }
-      let predecessor = null;
-      for (const record of db.data.random.records) {
-        if (record.key < boundary && (predecessor === null || record.key > predecessor.key)) {
-          predecessor = { database: name, key: record.key };
-        }
-      }
-      return { name, predecessor, hamming: db.data.hamming.records };
+      return { name, random: db.data.random.records, hamming: db.data.hamming.records };
     });
     // Convert rejections to results before racing so every failure is observed.
     const observed = work.map((promise, index) => promise.then(
@@ -30,22 +27,49 @@ export async function queryDatabases(databases, boundary, metrics) {
     const errors = results.filter(result => 'error' in result).map(result => result.error);
     if (errors.length) throw new AggregateError(errors, 'Database query failed');
     const snapshots = results.map(result => result.value);
-    const random = snapshots.map(result => result.predecessor)
-      .filter(Boolean).reduce((best, record) => !best || record.key > best.key ? record : best, null);
+    const cursors = snapshots.flatMap(snapshot => ['random', 'hamming'].map(section => ({
+      name: snapshot.name, section, records: snapshot[section], index: 0,
+    })));
+    const traversal = {
+      steps: 0, databaseSwitches: 0,
+      visits: Object.fromEntries(snapshots.map(({ name }) => [name, { random: 0, hamming: 0 }])),
+      firstDatabase: null, lastDatabase: null, preview: [], previewTruncated: false,
+    };
+    let random = null;
     let hamming = null;
-    if (random) {
-      for (const snapshot of snapshots) {
-        for (const record of snapshot.hamming) {
-          if (random.key < record.key && record.key < boundary &&
-              (!hamming || record.key < hamming.key)) {
-            hamming = { database: snapshot.name, key: record.key, rank: record.rank, value: record.value };
-          }
-        }
+
+    while (true) {
+      let next = null;
+      for (const cursor of cursors) {
+        const record = cursor.records[cursor.index];
+        if (record && (!next || record.key < next.records[next.index].key)) next = cursor;
+      }
+      if (!next || next.records[next.index].key >= boundary) break;
+      const record = next.records[next.index++];
+      traversal.steps++;
+      traversal.visits[next.name][next.section]++;
+      if (traversal.lastDatabase !== null && traversal.lastDatabase !== next.name) {
+        traversal.databaseSwitches++;
+      }
+      traversal.firstDatabase ??= next.name;
+      traversal.lastDatabase = next.name;
+      if (traversal.preview.length < 16) {
+        traversal.preview.push({ database: next.name, section: next.section, key: record.key });
+      } else {
+        traversal.previewTruncated = true;
+      }
+
+      if (next.section === 'random') {
+        random = { database: next.name, key: record.key };
+        hamming = null;
+      } else if (random && record.key > random.key && !hamming) {
+        hamming = { database: next.name, key: record.key, rank: record.rank, value: record.value };
       }
     }
     return {
       boundary, pair: random && hamming ? { random, hamming } : null,
       firstDatabase: databases[first.index].name,
+      traversal,
     };
   } finally {
     metrics?.raceSettled();

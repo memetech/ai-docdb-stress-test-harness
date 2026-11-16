@@ -41,6 +41,8 @@ try {
       console.log(`${name}: ${operations.load?.calls ?? 0} loads, ${operations.save?.calls ?? 0} saves`);
     }
     console.log(`Errors: ${measurements.errors.length}; pending races: ${measurements.races.pending}`);
+    console.log(`In-memory database switches: ${queries.traversal.databaseSwitches} ` +
+      `across ${queries.traversal.steps} visited records`);
     console.log(`Report: ${report.reportPath}`);
     if (report.status !== 'passed') {
       for (const error of measurements.errors.slice(0, 5)) console.error(error.message);

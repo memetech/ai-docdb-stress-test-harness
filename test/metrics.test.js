@@ -4,7 +4,7 @@ import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import test from 'node:test';
 import { setTimeout } from 'node:timers/promises';
-import { openDatabase } from '../src/database.js';
+import { openDatabase, readDatabase, writeDatabase } from '../src/database.js';
 import { Metrics } from '../src/metrics.js';
 
 test('metrics observe real adapter IO, errors, memory and drained races over time', async (t) => {
@@ -15,14 +15,14 @@ test('metrics observe real adapter IO, errors, memory and drained races over tim
   const filename = join(directory, 'db1.json');
   const document = { numbers: Array.from({ length: 4096 }, (_, index) => index) };
   const writer = openDatabase(filename, 'db1', metrics, document);
-  await metrics.stage('save', () => writer.db.write());
+  await metrics.stage('save', () => writeDatabase(writer));
 
   const readers = [0, 1].map(() => openDatabase(filename, 'db1', metrics));
   await metrics.stage('race', async () => {
     metrics.raceStarted();
-    const reads = readers.map(async ({ db }) => {
-      await db.read();
-      assert.deepEqual(db.data, document);
+    const reads = readers.map(async reader => {
+      await readDatabase(reader);
+      assert.deepEqual(reader.db.data, document);
     });
     try {
       await Promise.race(reads);
@@ -35,7 +35,7 @@ test('metrics observe real adapter IO, errors, memory and drained races over tim
 
   // A failed read still counts as an adapter invocation and a failed stage.
   await writeFile(filename, '{invalid JSON');
-  await assert.rejects(metrics.stage('corrupt-load', () => readers[0].db.read()), SyntaxError);
+  await assert.rejects(metrics.stage('corrupt-load', () => readDatabase(readers[0])), SyntaxError);
   const report = metrics.stop();
   assert.equal(metrics.stop(), report);
   assert.equal(report.errors.length, 1);
@@ -48,9 +48,9 @@ test('metrics observe real adapter IO, errors, memory and drained races over tim
   assert.deepEqual(report.races, { started: 1, completed: 1, pending: 0, peakPending: 1 });
   assert.equal(report.databases.db1.save.calls, 1);
   assert.equal(report.databases.db1.load.calls, 3);
-  const serializedBytes = Buffer.byteLength(JSON.stringify(document));
-  assert.equal(report.databases.db1.save.bytes, serializedBytes);
-  assert.equal(report.databases.db1.load.bytes, serializedBytes * 2 + Buffer.byteLength('{invalid JSON'));
+  const serializedBytes = Buffer.byteLength(JSON.stringify(document, null, 2));
+  assert.equal(report.databases.db1.save.fileBytes, serializedBytes);
+  assert.equal(report.databases.db1.load.fileBytes, serializedBytes * 2 + Buffer.byteLength('{invalid JSON'));
   assert.ok(report.databases.db1.save.durationMs >= 0);
   assert.ok(report.databases.db1.load.durationMs >= 0);
 

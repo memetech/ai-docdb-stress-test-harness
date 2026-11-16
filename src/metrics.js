@@ -39,7 +39,7 @@ function describeError(error, depth = 0) {
   };
 }
 
-/** Measurements are process-wide; database bytes count serialized adapter traffic. */
+/** IO measurements are process-wide; database file sizes are observed separately. */
 export class Metrics {
   constructor({ sampleIntervalMs = 25, maxSamples = 20_000 } = {}) {
     if (!Number.isFinite(sampleIntervalMs) || sampleIntervalMs < 1) {
@@ -109,12 +109,12 @@ export class Metrics {
     }
   }
 
-  recordDatabase(operation, database, durationMs, bytes = 0) {
+  recordDatabase(operation, database, durationMs, fileBytes = 0) {
     const databaseMetrics = this.databases[database] ??= {};
-    const operationMetrics = databaseMetrics[operation] ??= { calls: 0, durationMs: 0, bytes: 0 };
+    const operationMetrics = databaseMetrics[operation] ??= { calls: 0, durationMs: 0, fileBytes: 0 };
     operationMetrics.calls += 1;
     operationMetrics.durationMs += durationMs;
-    operationMetrics.bytes += bytes;
+    operationMetrics.fileBytes += fileBytes;
     this.sample(`database:${database}:${operation}`);
   }
 
@@ -160,7 +160,8 @@ export class Metrics {
         notes: [
           'IO counters cover this process, including measurement overhead, up to stop().',
           'Linux rchar/wchar are requested bytes; read_bytes/write_bytes reflect storage IO and can be zero for cached reads.',
-          'Database bytes count adapter traffic, not physical storage IO.',
+          'Database fileBytes sums file sizes observed after lowdb calls, including failed calls; it does not measure transferred bytes.',
+          'File-size observations use stat outside lowdb and do not alter its adapter or behavior.',
           'Intervals can be delayed by synchronous work; stage and database boundaries are sampled too.',
         ],
       },
