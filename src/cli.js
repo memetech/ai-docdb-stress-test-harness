@@ -1,6 +1,9 @@
 import { runHarness } from './harness.js';
 
 const usage = `Usage: npm start -- [options]
+  --databases N        Logical databases (default 2)
+  --files N            Total shard files, at least databases (default: databases)
+  --read-concurrency N Maximum concurrent query file reads (default 8)
   --records N          Records per section, power of two (default 1024)
   --section-mib N      Size of each section in MiB (default 5)
   --sample-rate N      Fraction of query boundaries (default 0.1)
@@ -11,6 +14,9 @@ const usage = `Usage: npm start -- [options]
 
 const options = {};
 const flags = new Map([
+  ['--databases', ['databaseCount', Number]],
+  ['--files', ['fileCount', Number]],
+  ['--read-concurrency', ['readConcurrency', Number]],
   ['--records', ['records', Number]],
   ['--section-mib', ['sectionBytes', value => Math.round(Number(value) * 1024 * 1024)]],
   ['--sample-rate', ['sampleRate', Number]],
@@ -38,11 +44,13 @@ try {
     console.log(`Time: ${measurements.durationMs.toFixed(1)} ms; peak sampled RSS: ` +
       `${(measurements.memory.peak.rss / 1024 / 1024).toFixed(1)} MiB`);
     for (const [name, operations] of Object.entries(measurements.databases)) {
-      console.log(`${name}: ${operations.load?.calls ?? 0} loads, ${operations.save?.calls ?? 0} saves`);
+      console.log(`${name}: ${operations.load?.calls ?? 0} loads, ${operations.save?.calls ?? 0} saves, ` +
+        `${operations.flush?.calls ?? 0} disk flushes, ${operations.evict?.calls ?? 0} cache evictions`);
     }
     console.log(`Errors: ${measurements.errors.length}; pending races: ${measurements.races.pending}`);
     console.log(`In-memory database switches: ${queries.traversal.databaseSwitches} ` +
-      `across ${queries.traversal.steps} visited records`);
+      `(file switches: ${queries.traversal.fileSwitches}) across ${queries.traversal.steps} visited records`);
+    console.log(`Persisted matches: ${queries.persisted}; retained file caches: ${report.cache.retainedFiles}`);
     console.log(`Report: ${report.reportPath}`);
     if (report.status !== 'passed') {
       for (const error of measurements.errors.slice(0, 5)) console.error(error.message);

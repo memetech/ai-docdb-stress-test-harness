@@ -54,6 +54,7 @@ export class Metrics {
     this.samplesDropped = 0;
     this.stages = [];
     this.databases = {};
+    this.files = {};
     this.races = { started: 0, completed: 0, pending: 0, peakPending: 0 };
     this.errors = [];
     this.peakMemory = {};
@@ -109,13 +110,15 @@ export class Metrics {
     }
   }
 
-  recordDatabase(operation, database, durationMs, fileBytes = 0) {
-    const databaseMetrics = this.databases[database] ??= {};
-    const operationMetrics = databaseMetrics[operation] ??= { calls: 0, durationMs: 0, fileBytes: 0 };
-    operationMetrics.calls += 1;
-    operationMetrics.durationMs += durationMs;
-    operationMetrics.fileBytes += fileBytes;
-    this.sample(`database:${database}:${operation}`);
+  recordDatabase(operation, database, durationMs, fileBytes = 0, fileName = database) {
+    for (const [groups, name] of [[this.databases, database], [this.files, fileName]]) {
+      const group = groups[name] ??= {};
+      const entry = group[operation] ??= { calls: 0, durationMs: 0, fileBytes: 0 };
+      entry.calls += 1;
+      entry.durationMs += durationMs;
+      entry.fileBytes += fileBytes;
+    }
+    this.sample(`database:${fileName}:${operation}`);
   }
 
   raceStarted() {
@@ -162,10 +165,12 @@ export class Metrics {
           'Linux rchar/wchar are requested bytes; read_bytes/write_bytes reflect storage IO and can be zero for cached reads.',
           'Database fileBytes sums file sizes observed after lowdb calls, including failed calls; it does not measure transferred bytes.',
           'File-size observations use stat outside lowdb and do not alter its adapter or behavior.',
+          'Flush calls fsync each saved file; eviction releases lowdb data references, not the operating system page cache.',
           'Intervals can be delayed by synchronous work; stage and database boundaries are sampled too.',
         ],
       },
       databases: this.databases,
+      files: this.files,
       races: this.races,
       errors: this.errors,
       sampleIntervalMs: this.sampleIntervalMs,

@@ -24,7 +24,7 @@ function fakeDatabase(name, random, hamming, read = async () => {}) {
 
 function orderedRows(documents, boundary) {
   return documents.flatMap(document => ['random', 'hamming'].flatMap(section =>
-    document[section].records.map(({ key }) => ({ database: document.database, section, key }))))
+    document[section].records.map(({ key }) => ({ database: document.database, file: document.file, section, key }))))
     .filter(({ key }) => key < boundary).sort((a, b) => a.key - b.key);
 }
 
@@ -53,7 +53,7 @@ test('ordered sections interleave ownership across both files', () => {
   for (const [databaseIndex, document] of documents.entries()) {
     assert.equal(document.random.records.length, 16);
     assert.equal(document.hamming.records.length, 16);
-    assert.equal(document.formatVersion, 2);
+    assert.equal(document.formatVersion, 3);
     for (const [rank, record] of document.random.records.entries()) {
       const slot = (2 * rank + databaseIndex) * KEY_STRIDE;
       assert.ok(record.key >= slot && record.key < slot + KEY_STRIDE - 2);
@@ -110,7 +110,7 @@ test('all generated boundaries return the independently calculated cross-file pa
   const documents = [fixture(0), fixture(1)];
   let reads = 0;
   const databases = documents.map(document => ({
-    name: document.database,
+    name: document.file, databaseName: document.database,
     db: { data: document, async read() { reads++; } },
   }));
   const reference = createReference(documents);
@@ -119,7 +119,7 @@ test('all generated boundaries return the independently calculated cross-file pa
     const { pair, traversal } = await queryDatabases(databases, boundary);
     assert.deepEqual(pair, reference(boundary));
     assert.ok(pair);
-    assert.notEqual(pair.random.database, pair.hamming.database);
+    assert.notEqual(pair.random.file, pair.hamming.file);
     assert.ok(pair.random.key < pair.hamming.key && pair.hamming.key < boundary);
     const rows = orderedRows(documents, boundary);
     assert.equal(traversal.steps, rows.length);
@@ -222,4 +222,97 @@ test('queries use strict boundaries and select the nearest floor, with explicit 
   assert.equal((await queryDatabases(databases, 2)).pair, null);
   assert.equal((await queryDatabases(databases, 1)).pair, null);
   assert.equal((await queryDatabases(databases, 9)).pair, null);
+});
+
+for (const fileCount of [1, 3, 5]) {
+  test(`a shared closed Gray cycle spans ${fileCount} files with ordered mixed sections`, async () => {
+    const databaseCount = fileCount === 3 ? 2 : Math.min(fileCount, 3);
+    const documents = Array.from({ length: fileCount }, (_, fileIndex) => generateDocument({
+      databaseIndex: fileIndex % databaseCount, databaseCount, fileIndex, fileCount,
+      records: 16, sectionBytes: 8192, seed: 81,
+    }));
+    const combined = documents.flatMap(document => document.hamming.records)
+      .sort((a, b) => a.rank - b.rank);
+    assert.deepEqual(combined.map(record => record.rank),
+      Array.from({ length: 16 * fileCount }, (_, rank) => rank));
+    assert.equal(new Set(combined.map(record => record.value)).size, combined.length);
+    for (let i = 0; i < combined.length; i++) {
+      assert.equal(hammingDistance(combined[i].value, combined[(i + 1) % combined.length].value), 1);
+    }
+    for (const [fileIndex, document] of documents.entries()) {
+      assert.equal(document.database, `db${fileIndex % databaseCount + 1}`);
+      assert.equal(document.file, `file${fileIndex + 1}`);
+      assert.equal(document.random.records.length, 16);
+      assert.equal(document.hamming.records.length, 16);
+      assert.equal(document.hamming.rankStride, fileCount);
+      assert.equal(document.hamming.rankOffset, (fileIndex + fileCount - 1) % fileCount);
+      for (const section of ['random', 'hamming']) {
+        assert.equal(Buffer.byteLength(JSON.stringify(document[section])), 8192);
+        assert.ok(document[section].records.every((record, index, records) =>
+          !index || record.key > records[index - 1].key));
+      }
+    }
+    const handles = documents.map(document => ({
+      name: document.file, databaseName: document.database,
+      db: { data: document, async read() {} },
+    }));
+    const reference = createReference(documents);
+    const boundaries = sampleBoundaries(16, 1, makeRandom(1), fileCount);
+    assert.equal(boundaries.length, 16 * fileCount);
+    for (const boundary of boundaries) {
+      const { pair, traversal, usedFiles } = await queryDatabases(handles, boundary);
+      assert.deepEqual(pair, reference(boundary));
+      assert.ok(pair);
+      if (fileCount > 1) assert.notEqual(pair.random.file, pair.hamming.file);
+      const rows = orderedRows(documents, boundary);
+      assert.deepEqual(traversal.preview, rows.slice(0, 16));
+      assert.equal(traversal.steps, rows.length);
+      assert.equal(traversal.fileSwitches,
+        rows.filter((row, index) => index && row.file !== rows[index - 1].file).length);
+      assert.equal(traversal.databaseSwitches,
+        rows.filter((row, index) => index && row.database !== rows[index - 1].database).length);
+      assert.deepEqual(new Set(usedFiles), new Set(documents.map(document => document.file)));
+      for (const document of documents) {
+        for (const section of ['random', 'hamming']) {
+          assert.equal(traversal.fileVisits[document.file][section],
+            rows.filter(row => row.file === document.file && row.section === section).length);
+        }
+      }
+    }
+  });
+}
+
+test('bounded reads drain all files after an early failure and a later failure', async () => {
+  const metrics = new Metrics().start();
+  const errors = [new Error('first file failed'), new Error('last file failed')];
+  let active = 0;
+  let peak = 0;
+  const completed = [];
+  const handles = Array.from({ length: 5 }, (_, index) => fakeDatabase(`file${index + 1}`,
+    [index], [index + 10], async () => {
+      active++;
+      peak = Math.max(peak, active);
+      try {
+        await delay(index === 4 ? 12 : 2);
+        if (index === 0) throw errors[0];
+        if (index === 4) throw errors[1];
+      } finally {
+        active--;
+        completed.push(index);
+      }
+    }));
+  try {
+    await assert.rejects(queryDatabases(handles, 100, metrics, { readConcurrency: 2 }), error => {
+      assert.ok(error instanceof AggregateError);
+      assert.deepEqual(error.errors, errors);
+      return true;
+    });
+    assert.equal(peak, 2);
+    assert.equal(active, 0);
+    assert.deepEqual([...completed].sort(), [0, 1, 2, 3, 4]);
+    assert.equal(metrics.races.pending, 0);
+    assert.equal(metrics.races.completed, 1);
+  } finally {
+    metrics.stop();
+  }
 });

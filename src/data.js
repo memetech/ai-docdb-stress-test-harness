@@ -36,12 +36,44 @@ function randomDigits(length, random) {
   return bytes.toString('ascii');
 }
 
-function cyclicPayload(cycle, start, length) {
-  if (length === 0) return '';
-  const offset = start % cycle.length;
-  if (offset + length <= cycle.length) return cycle.slice(offset, offset + length);
-  return cycle.repeat(Math.ceil((length + offset) / cycle.length))
-    .slice(offset, offset + length);
+export function validateLayout(databaseCount, fileCount) {
+  if (!Number.isSafeInteger(databaseCount) || databaseCount < 1) {
+    throw new RangeError('databaseCount must be a positive safe integer');
+  }
+  if (!Number.isSafeInteger(fileCount) || fileCount < databaseCount) {
+    throw new RangeError('fileCount must be a safe integer at least databaseCount');
+  }
+  return { databaseCount, fileCount };
+}
+
+function cycleValue(rank, half, railBit) {
+  const index = rank < half ? rank : 2 * half - 1 - rank;
+  return (index ^ (index >>> 1)) | (rank < half ? 0 : railBit);
+}
+
+// Reflect any length of Gray-code path onto a second bit rail. This closes a
+// one-bit cycle for every even length, including non-power-of-two file counts.
+export function grayValue(rank, length) {
+  if (!Number.isSafeInteger(length) || length < 2 || length > 2 ** 30 || length % 2 !== 0) {
+    throw new RangeError('Gray cycle length must be even and between 2 and 1073741824');
+  }
+  if (!Number.isSafeInteger(rank) || rank < 0 || rank >= length) {
+    throw new RangeError('Gray rank must be within the cycle');
+  }
+  const half = length / 2;
+  return cycleValue(rank, half, 2 ** Math.ceil(Math.log2(half)));
+}
+
+function cyclicPayload(startRank, length, cycleLength, bits, rotation) {
+  const half = cycleLength / 2;
+  const railBit = 2 ** Math.ceil(Math.log2(half));
+  const chunks = [];
+  for (let index = 0; index < Math.ceil(length / bits); index += 1) {
+    const rank = (startRank + index) % cycleLength;
+    chunks.push(rotate(cycleValue(rank, half, railBit), rotation, bits)
+      .toString(2).padStart(bits, '0'));
+  }
+  return chunks.join('').slice(0, length);
 }
 
 function fillSection(section, targetBytes, payload) {
@@ -61,17 +93,25 @@ function fillSection(section, targetBytes, payload) {
 /**
  * Each JSON section occupies exactly sectionBytes. Records are ordered by key;
  * Gray-code values follow their rank, since sorting the values would break the
- * minimum-distance cycle. Both files contain half of one shared cycle, with
- * alternating rank ownership. Opposite Hamming ownership forces cross-file pairs.
+ * minimum-distance cycle. Each shard owns interleaved ranks of the same cycle,
+ * with the Hamming ownership shifted one file to force cross-file pairs.
  */
 export function generateDocument({
   databaseIndex,
+  databaseCount = 2,
+  fileIndex = databaseIndex,
+  fileCount = databaseCount,
   sectionBytes = DEFAULT_SECTION_BYTES,
   records = DEFAULT_RECORDS,
   seed = 0x5eed,
 } = {}) {
-  if (databaseIndex !== 0 && databaseIndex !== 1) {
-    throw new RangeError('databaseIndex must be 0 or 1');
+  validateLayout(databaseCount, fileCount);
+  if (!Number.isSafeInteger(fileIndex) || fileIndex < 0 || fileIndex >= fileCount) {
+    throw new RangeError('fileIndex must be within fileCount');
+  }
+  if (!Number.isSafeInteger(databaseIndex) || databaseIndex < 0 || databaseIndex >= databaseCount
+      || databaseIndex !== fileIndex % databaseCount) {
+    throw new RangeError('databaseIndex must equal fileIndex modulo databaseCount');
   }
   if (!Number.isSafeInteger(records) || records < 2 || records > 2 ** 20
       || (records & (records - 1)) !== 0) {
@@ -84,38 +124,45 @@ export function generateDocument({
     throw new RangeError('seed must be a safe integer');
   }
 
-  const random = makeRandom((seed ^ Math.imul(databaseIndex + 1, 0x9e3779b1)) >>> 0);
-  const globalCycleLength = records * 2;
-  const cycleBits = Math.log2(globalCycleLength);
+  const globalCycleLength = records * fileCount;
+  if (!Number.isSafeInteger(globalCycleLength) || globalCycleLength > 2 ** 30) {
+    throw new RangeError('records multiplied by fileCount must be at most 1073741824');
+  }
+  const random = makeRandom((seed ^ Math.imul(fileIndex + 1, 0x9e3779b1)) >>> 0);
+  const cycleBits = Math.ceil(Math.log2(globalCycleLength / 2)) + 1;
   const rotation = (seed >>> 0) % cycleBits;
-  const rankParity = 1 - databaseIndex;
+  const rankOffset = (fileIndex + fileCount - 1) % fileCount;
   const randomRecords = [];
   const hammingRecords = [];
   for (let index = 0; index < records; index += 1) {
     randomRecords.push({
-      key: (2 * index + databaseIndex) * KEY_STRIDE
+      key: (fileCount * index + fileIndex) * KEY_STRIDE
         + Math.floor(random() * (KEY_STRIDE - 2)),
       payload: '',
     });
-    const rank = 2 * index + rankParity;
+    const rank = fileCount * index + rankOffset;
     hammingRecords.push({
       key: (rank + 1) * KEY_STRIDE - 2,
       rank,
-      value: rotate(rank ^ (rank >>> 1), rotation, cycleBits),
+      value: rotate(grayValue(rank, globalCycleLength), rotation, cycleBits),
       payload: '',
     });
   }
-  const cycle = Array.from({ length: globalCycleLength }, (_, rank) =>
-    rotate(rank ^ (rank >>> 1), rotation, cycleBits).toString(2).padStart(cycleBits, '0')).join('');
   const randomSection = fillSection({ records: randomRecords }, sectionBytes,
     (length) => randomDigits(length, random));
   const hammingSection = fillSection({
-    cycleBits, rotation, globalCycleLength, rankParity, records: hammingRecords,
-  }, sectionBytes, (length, index) => cyclicPayload(cycle, hammingRecords[index].rank * cycleBits, length));
+    cycleBits, rotation, globalCycleLength, rankOffset, rankStride: fileCount,
+    ...(fileCount === 2 ? { rankParity: rankOffset } : {}), records: hammingRecords,
+  }, sectionBytes, (length, index) =>
+    cyclicPayload(hammingRecords[index].rank, length, globalCycleLength, cycleBits, rotation));
 
   return {
-    formatVersion: 2,
+    formatVersion: 3,
     database: `db${databaseIndex + 1}`,
+    file: `file${fileIndex + 1}`,
+    fileIndex,
+    fileCount,
+    databaseCount,
     recordsPerSection: records,
     sectionBytes,
     seed: seed >>> 0,

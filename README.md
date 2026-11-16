@@ -8,12 +8,12 @@ npm test
 npm start
 ```
 
-Each database contains 5 MiB of seeded random data and 5 MiB of Hamming data, plus JSON formatting and metadata. Both distributions are split equally across files and interleave by key. One shared, rotated Gray cycle alternates ranks between databases (one-bit changes globally, including wraparound).
+`--databases N --files M` distributes M shard files round-robin across N logical databases (M >= N >= 1). Each file uses the standard lowdb `JSONFile` adapter and contains 5 MiB of random data and 5 MiB of Hamming data, plus JSON formatting/metadata. Both distributions interleave across files. One shared Gray cycle has one-bit transitions, including wraparound, for any supported file count.
 
-Fresh lowdb instances use the standard `JSONFile` adapter. Each query reloads both files once, using `Promise.race` to observe the first completion and waiting for both. It then merges all four ordered streams, switching databases as interleaved records are visited. For boundary `b`, return the maximum random key `r < b` and nearest Hamming floor `r < h < b`. Pairs require opposite files. Lowdb failures are reported without workarounds.
+Each query reloads every shard (bounded by `--read-concurrency`, default 8), observes the first completion with `Promise.race`, waits for all reads, and merges the ordered streams. For boundary `b`, return maximum random key `r < b` and nearest Hamming floor `r < h < b`. After a verified match, save every shard read by that query, `fsync` each file, then release all used lowdb data from memory. Failed saves/flushes fail the query and retain its caches; there are no adapter workarounds. Eviction does not clear the OS page cache or force JavaScript garbage collection.
 
-Default: 1,024 records per section; 205 queries sampled without replacement from 2,048 boundaries (10%, rounded up). Pass means every sampled query completes and matches the reference, with no errors or pending races.
+Default: 2 databases, 2 files, 1,024 records per section; 205 queries sampled from 2,048 boundaries (10%, rounded up). Pass requires every sampled query to match the reference, save/flush/evict all used shards, and leave no errors, pending races, or retained caches. Existing deleted-file/JSON-`null` checks report lowdb's cached-data behavior as failures.
 
-Reports in `.runs/run-*/report.json` include each file's distribution sizes/counts, per-query traversal switches and path previews, timing, memory/filesystem samples, load/save calls, errors, and pending races. Traversal switches are in memory; file reads are counted separately. Cached reads can produce zero physical disk reads.
+Reports in `.runs/run-*/report.json` include per-file and logical-database load/save/flush/eviction counters, traversal switches, timings, memory/filesystem samples, and failures. Traversal switches are in memory; cached reads may produce zero physical disk reads.
 
-Options: `npm start -- --records 256 --seed 42 --section-mib 5 --sample-rate 0.1 --interval-ms 25`.
+Example: `npm start -- --databases 3 --files 7 --records 256 --section-mib 5 --sample-rate 0.1 --read-concurrency 4`.
