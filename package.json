@@ -1,0 +1,13 @@
+{
+  "name": "ai-docdb-stress-test-harness",
+  "version": "0.1.0",
+  "private": true,
+  "type": "module",
+  "description": "A lowdb cross-file query and resource measurement harness",
+  "engines": { "node": ">=22" },
+  "scripts": {
+    "start": "node src/cli.js",
+    "test": "node --test"
+  },
+  "dependencies": { "lowdb": "7.0.1" }
+}
