@@ -9,6 +9,10 @@ const usage = `Usage: npm start -- [options]
   --sample-rate N      Fraction of query boundaries (default 0.1)
   --seed N             Reproducible data and query seed (default 24301)
   --interval-ms N      Resource sampling interval (default 25)
+  --fault move-shard   Copy a warm shard to another database and remove source
+  --fault-query N      Inject at sampled query N (1-based, default last)
+  --fault-file FILE    Source shard ID (default file1)
+  --fault-destination DB Destination database ID (default next database)
   --out PATH           Parent directory for unique runs (default .runs)
   --help               Show this message`;
 
@@ -22,6 +26,10 @@ const flags = new Map([
   ['--sample-rate', ['sampleRate', Number]],
   ['--seed', ['seed', Number]],
   ['--interval-ms', ['sampleIntervalMs', Number]],
+  ['--fault', ['fault', String]],
+  ['--fault-query', ['faultQuery', Number]],
+  ['--fault-file', ['faultFile', String]],
+  ['--fault-destination', ['faultDestination', String]],
   ['--out', ['outputDirectory', String]],
 ]);
 
@@ -51,6 +59,12 @@ try {
     console.log(`In-memory database switches: ${queries.traversal.databaseSwitches} ` +
       `(file switches: ${queries.traversal.fileSwitches}) across ${queries.traversal.steps} visited records`);
     console.log(`Persisted matches: ${queries.persisted}; retained file caches: ${report.cache.retainedFiles}`);
+    if (report.fault) {
+      console.log(`Fault: ${report.fault.type}, query ${report.fault.query}, ${report.fault.status}`);
+      console.log(`Shard: ${report.fault.sourceFilename ?? report.fault.file} -> ` +
+        `${report.fault.destinationFilename ?? report.fault.destinationDatabase}`);
+      console.log(`Unrun queries: ${queries.unrun}`);
+    }
     console.log(`Report: ${report.reportPath}`);
     if (report.status !== 'passed') {
       for (const error of measurements.errors.slice(0, 5)) console.error(error.message);
