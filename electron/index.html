@@ -1,0 +1,25 @@
+<!doctype html>
+<html lang="en">
+  <head>
+    <meta charset="UTF-8">
+    <meta http-equiv="Content-Security-Policy" content="default-src 'self'; style-src 'unsafe-inline'">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>Document Database Stress Test</title>
+    <style>
+      body { font: 16px system-ui, sans-serif; margin: 2rem; }
+      form { display: grid; gap: 0.75rem; }
+      input { padding: 0.6rem; }
+      button { justify-self: start; padding: 0.6rem 1rem; }
+      output { min-height: 1.5rem; white-space: pre-wrap; }
+    </style>
+  </head>
+  <body>
+    <form>
+      <label for="arguments">Arguments</label>
+      <input id="arguments" name="arguments" type="text" placeholder="--records 256 --sample-rate 0.1">
+      <button type="submit">Run stress test</button>
+      <output id="status" aria-live="polite"></output>
+    </form>
+    <script type="module" src="renderer.js"></script>
+  </body>
+</html>

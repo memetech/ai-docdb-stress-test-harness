@@ -4,10 +4,12 @@
   "private": true,
   "type": "module",
   "description": "A lowdb cross-file query and resource measurement harness",
-  "engines": { "node": ">=22" },
+  "engines": { "node": ">=22.12" },
   "scripts": {
     "start": "node src/cli.js",
+    "electron": "electron electron/main.js",
     "test": "node --test"
   },
-  "dependencies": { "lowdb": "7.0.1" }
+  "dependencies": { "lowdb": "7.0.1" },
+  "devDependencies": { "electron": "45.3.3" }
 }

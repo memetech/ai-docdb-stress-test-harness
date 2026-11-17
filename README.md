@@ -1,12 +1,15 @@
 # ai-docdb-stress-test-harness
 
-Node.js 22+ lowdb stress test.
+Node.js 22.12+ lowdb stress test.
 
 ```sh
 npm ci
 npm test
 npm start
+npm run electron
 ```
+
+The Electron application accepts the same CLI options in its **Arguments** field. **Run stress test** sends those arguments over IPC and invokes the harness directly in Electron's main process. Reports continue to be written under `.runs` by default, or under the directory supplied with `--out`.
 
 `--databases N --files M` distributes M shard files round-robin across N logical databases (M >= N >= 1). Each file uses the standard lowdb `JSONFile` adapter and contains 5 MiB of random data and 5 MiB of Hamming data, plus JSON formatting/metadata. Both distributions interleave across files. One shared Gray cycle has one-bit transitions, including wraparound, for any supported file count.
 
