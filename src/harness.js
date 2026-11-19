@@ -1,5 +1,4 @@
 import assert from 'node:assert/strict';
-import { createHash } from 'node:crypto';
 import { mkdir, mkdtemp, stat, writeFile } from 'node:fs/promises';
 import { resolve, join, basename } from 'node:path';
 import { performance } from 'node:perf_hooks';
@@ -9,8 +8,7 @@ import { openDatabase, readDatabase, writeDatabase, saveAndFlushDatabases } from
 import { Metrics } from './metrics.js';
 import { createReference, queryDatabases, sampleBoundaries } from './query.js';
 import { moveShardFile } from './faults.js';
-
-const digest = document => createHash('sha256').update(JSON.stringify(document)).digest('hex');
+import { documentDigest, mutateAfterQuery, verifyPersistedDatabases } from './mutation.js';
 
 function configureFault({ fault, faultQuery, faultFile, faultDestination, databaseCount, fileCount, selected }) {
   if (fault === null) {
@@ -99,7 +97,7 @@ export async function runHarness({
     queries: {
       population: records * fileCount, selected: boundaries.length,
       attempted: 0, completed: 0, passed: 0, failed: 0, unrun: boundaries.length,
-      crossDatabasePairs: 0, crossFilePairs: 0, persisted: 0, results: [],
+      crossDatabasePairs: 0, crossFilePairs: 0, mutated: 0, persisted: 0, verified: 0, results: [],
       traversal: { steps: 0, databaseSwitches: 0, fileSwitches: 0, visits: {}, fileVisits: {} },
     },
   };
@@ -112,7 +110,8 @@ export async function runHarness({
       })));
     const reference = createReference(documents);
     const expected = boundaries.map(boundary => reference(boundary));
-    const digests = documents.map(digest);
+    const digests = documents.map(documentDigest);
+    const expectedDigests = new Map(documents.map((document, index) => [document.file, digests[index]]));
     await metrics.stage('save', async () => {
       for (const document of documents) {
         const databaseDirectory = join(directory, document.database);
@@ -142,7 +141,7 @@ export async function runHarness({
         const results = await Promise.allSettled(readers.slice(offset, offset + readConcurrency)
           .map(async (reader, index) => {
             await readDatabase(reader);
-            assert.equal(digest(reader.db.data), digests[offset + index], `${reader.name}: round-trip mismatch`);
+            assert.equal(documentDigest(reader.db.data), digests[offset + index], `${reader.name}: round-trip mismatch`);
           }));
         errors.push(...results.filter(result => result.status === 'rejected').map(result => result.reason));
       }
@@ -165,7 +164,7 @@ export async function runHarness({
             assert.ok(faultTarget.db.data, 'Fault requires a populated lowdb cache');
             warmCache = faultTarget.db.data;
             report.fault.cacheWarm = true;
-            report.fault.cachedDocumentDigest = digest(warmCache);
+            report.fault.cachedDocumentDigest = documentDigest(warmCache);
             metrics.sample('fault:move-shard:start');
             Object.assign(report.fault, await moveShardFile({
               sourceFilename: faultTarget.filename,
@@ -195,7 +194,7 @@ export async function runHarness({
             report.fault.sourceCacheRetained = faultTarget.db.data === warmCache;
             report.fault.sourceFileExists = await fileExists(faultTarget.filename);
             report.fault.referenceMatched = isDeepStrictEqual(result.pair, expected[index]);
-            report.fault.cacheDigestUnchanged = digest(faultTarget.db.data) === report.fault.cachedDocumentDigest;
+            report.fault.cacheDigestUnchanged = documentDigest(faultTarget.db.data) === report.fault.cachedDocumentDigest;
             report.fault.reproduced = report.fault.destinationVerified &&
               !report.fault.sourceFileExists && report.fault.sourceCacheRetained && report.fault.cacheDigestUnchanged;
             report.fault.status = report.fault.reproduced ? 'reproduced-stale-cache' : 'invalid-shard-accepted';
@@ -212,9 +211,17 @@ export async function runHarness({
           }
           const used = readers.filter(reader => result.usedFiles.includes(reader.name));
           assert.equal(used.length, result.usedFiles.length, 'Unknown file in query usage');
+          result.mutation = mutateAfterQuery(used, result.pair, expectedDigests);
+          report.queries.mutated++;
           result.persistence = await saveAndFlushDatabases(used);
           assert.ok(used.every(reader => reader.db.data === null), 'Used caches were not evicted');
           report.queries.persisted++;
+          result.verification = await verifyPersistedDatabases(used, expectedDigests);
+          report.queries.verified++;
+          for (const document of report.documents) {
+            document.finalSha256 = expectedDigests.get(document.file);
+            document.finalFileBytes = (await stat(document.filename)).size;
+          }
           report.queries.passed++;
           report.queries.crossDatabasePairs += Number(result.pair.random.database !== result.pair.hamming.database);
           report.queries.crossFilePairs += Number(result.pair.random.file !== result.pair.hamming.file);
@@ -263,7 +270,8 @@ export async function runHarness({
     queriesPerSecond: queries.completed / (queryStage.durationMs / 1000),
   } : null;
   report.status = queries.completed === queries.selected && queries.passed === queries.selected &&
-    queries.failed === 0 && queries.persisted === queries.selected &&
+    queries.failed === 0 && queries.mutated === queries.selected &&
+    queries.persisted === queries.selected && queries.verified === queries.selected &&
     report.cache.retainedFiles === 0 && measurements.errors.length === 0 &&
     measurements.races.pending === 0 && measurements.races.completed === queries.selected
     ? 'passed' : 'failed';

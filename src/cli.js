@@ -58,7 +58,8 @@ try {
     console.log(`Errors: ${measurements.errors.length}; pending races: ${measurements.races.pending}`);
     console.log(`In-memory database switches: ${queries.traversal.databaseSwitches} ` +
       `(file switches: ${queries.traversal.fileSwitches}) across ${queries.traversal.steps} visited records`);
-    console.log(`Persisted matches: ${queries.persisted}; retained file caches: ${report.cache.retainedFiles}`);
+    console.log(`Mutations: ${queries.mutated}; persisted matches: ${queries.persisted}; ` +
+      `verified mutations: ${queries.verified}; retained file caches: ${report.cache.retainedFiles}`);
     if (report.fault) {
       console.log(`Fault: ${report.fault.type}, query ${report.fault.query}, ${report.fault.status}`);
       console.log(`Shard: ${report.fault.sourceFilename ?? report.fault.file} -> ` +

@@ -40,7 +40,9 @@ test('a copied and removed shard reproduces stale cached reads inside the stress
   assert.equal(report.queries.attempted, 3);
   assert.equal(report.queries.completed, 3);
   assert.equal(report.queries.passed, 2);
+  assert.equal(report.queries.mutated, 2);
   assert.equal(report.queries.persisted, 2);
+  assert.equal(report.queries.verified, 2);
   assert.equal(report.queries.failed, 1);
   assert.equal(report.queries.unrun, 29);
   assert.equal(report.measurements.races.started, 3);
@@ -52,14 +54,15 @@ test('a copied and removed shard reproduces stale cached reads inside the stress
     const counts = report.measurements.files[file];
     assert.equal(counts.save.calls, 3, 'Only creation and the two pre-fault matches may save');
     assert.equal(counts.flush.calls, 2);
-    assert.equal(counts.evict.calls, 2);
+    assert.equal(counts.evict.calls, 4, 'Each pre-fault query evicts both query and verification caches');
   }
-  assert.equal(report.measurements.files.file1.load.calls, 5,
+  assert.equal(report.measurements.files.file1.load.calls, 7,
     'The source must be explicitly warmed again after prior matches evicted their caches');
-  assert.equal(report.measurements.files.file2.load.calls, 4);
+  assert.equal(report.measurements.files.file2.load.calls, 6);
   assert.equal(report.cache.retainedFiles, 2);
   assert.equal(report.queries.results.at(-1).status, 'failed');
   assert.equal(report.queries.results.at(-1).persistence, undefined);
+  assert.equal(report.queries.results.at(-1).mutation, undefined);
 
   await assert.rejects(stat(fault.sourceFilename), error => error.code === 'ENOENT');
   const copied = await readFile(fault.destinationFilename);
@@ -67,7 +70,8 @@ test('a copied and removed shard reproduces stale cached reads inside the stress
   assert.equal(createHash('sha256').update(copied).digest('hex'), fault.sha256);
   const original = report.documents.find(document => document.file === 'file1');
   assert.equal(original.filename, fault.sourceFilename);
-  assert.equal(createHash('sha256').update(JSON.stringify(JSON.parse(copied))).digest('hex'), original.sha256);
+  assert.equal(createHash('sha256').update(JSON.stringify(JSON.parse(copied))).digest('hex'), original.finalSha256);
+  assert.equal(fault.cachedDocumentDigest, original.finalSha256);
   assert.equal(JSON.parse(copied).database, 'db1', 'The injection copies bytes without rewriting metadata');
   assert.deepEqual(JSON.parse(await readFile(report.reportPath, 'utf8')), report);
 });

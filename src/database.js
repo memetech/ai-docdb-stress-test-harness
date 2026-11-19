@@ -31,6 +31,13 @@ async function observe(database, operation, call) {
 export const readDatabase = database => observe(database, 'load', () => database.db.read());
 export const writeDatabase = database => observe(database, 'save', () => database.db.write());
 
+export function evictDatabase(database) {
+  const start = performance.now();
+  database.db.data = null;
+  database.metrics?.recordDatabase('evict', database.databaseName ?? database.name,
+    performance.now() - start, 0, database.name);
+}
+
 /** Save and sync consulted files before releasing any of their lowdb data. */
 export async function saveAndFlushDatabases(databases) {
   const used = [...new Set(databases)];
@@ -57,11 +64,6 @@ export async function saveAndFlushDatabases(databases) {
 
   // Do not evict even one cache while a write or fsync can still fail. There is
   // no rollback of files already written, but all loaded data remains on error.
-  for (const database of used) {
-    const start = performance.now();
-    database.db.data = null;
-    database.metrics?.recordDatabase('evict', database.databaseName ?? database.name,
-      performance.now() - start, 0, database.name);
-  }
+  for (const database of used) evictDatabase(database);
   return { savedFiles, flushedFiles, evictedFiles: used.map(database => database.name) };
 }

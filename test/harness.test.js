@@ -7,6 +7,10 @@ import { test } from 'node:test';
 import { execFile } from 'node:child_process';
 import { promisify } from 'node:util';
 import { runHarness } from '../src/harness.js';
+import { generateDocument } from '../src/data.js';
+
+const digest = document => createHash('sha256').update(JSON.stringify(document)).digest('hex');
+const fileBytes = document => Buffer.byteLength(JSON.stringify(document, null, 2));
 
 async function verifyReport(report, { databaseCount, fileCount, records, sectionBytes, sampleRate }) {
   const selected = Math.ceil(fileCount * records * sampleRate);
@@ -14,7 +18,7 @@ async function verifyReport(report, { databaseCount, fileCount, records, section
   assert.equal(report.configuration.databaseCount, databaseCount);
   assert.equal(report.configuration.fileCount, fileCount);
   assert.equal(report.queries.population, fileCount * records);
-  for (const field of ['selected', 'attempted', 'completed', 'passed', 'persisted']) {
+  for (const field of ['selected', 'attempted', 'completed', 'passed', 'mutated', 'persisted', 'verified']) {
     assert.equal(report.queries[field], selected, field);
   }
   assert.equal(report.queries.failed, 0);
@@ -26,33 +30,65 @@ async function verifyReport(report, { databaseCount, fileCount, records, section
   assert.deepEqual(report.cache, { retainedFiles: 0, retainedNames: [] });
   assert.equal(report.documents.length, fileCount);
   const fileNames = report.documents.map(document => document.file);
+  // Rebuild an independent model from the seed, then replay only the intended
+  // counter increments. Compare entire final documents, not just report hashes.
+  const expected = new Map(Array.from({ length: fileCount }, (_, fileIndex) => {
+    const document = generateDocument({
+      databaseIndex: fileIndex % databaseCount, databaseCount, fileIndex, fileCount,
+      records, sectionBytes, seed: report.configuration.seed,
+    });
+    return [document.file, document];
+  }));
+  const expectedIo = new Map(report.documents.map(document => {
+    const source = expected.get(document.file);
+    assert.equal(document.sha256, digest(source));
+    assert.equal(document.fileBytes, fileBytes(source));
+    return [document.file, { loadBytes: fileBytes(source), saveBytes: fileBytes(source) }];
+  }));
+  for (const result of report.queries.results) {
+    for (const [file, document] of expected) expectedIo.get(file).loadBytes += fileBytes(document);
+    const mutation = result.mutation;
+    assert.equal(mutation.file, result.pair.random.file);
+    assert.equal(mutation.database, result.pair.random.database);
+    assert.equal(mutation.key, result.pair.random.key);
+    assert.equal(mutation.section, 'random');
+    const record = expected.get(mutation.file).random.records.find(record => record.key === mutation.key);
+    assert.equal(mutation.before, record.mutationCount ?? 0);
+    assert.equal(mutation.after, mutation.before + 1);
+    record.mutationCount = mutation.after;
+    for (const [file, document] of expected) {
+      expectedIo.get(file).saveBytes += fileBytes(document);
+      expectedIo.get(file).loadBytes += fileBytes(document); // fresh verification
+    }
+  }
   for (const document of report.documents) {
     assert.equal(document.randomBytes, sectionBytes);
     assert.equal(document.hammingBytes, sectionBytes);
     assert.equal(document.randomRecords, records);
     assert.equal(document.hammingRecords, records);
-    assert.equal(document.fileBytes, (await stat(document.filename)).size);
+    assert.equal(document.finalFileBytes, (await stat(document.filename)).size);
     assert.ok(document.fileBytes > 2 * sectionBytes);
     const io = report.measurements.files[document.file];
-    assert.equal(io.load.calls, selected + 1); // fresh load plus each query
+    assert.equal(io.load.calls, 2 * selected + 1); // initial load, query and fresh verification
     assert.equal(io.save.calls, selected + 1); // creation plus each matching query
     assert.equal(io.flush.calls, selected);
-    assert.equal(io.evict.calls, selected);
-    assert.equal(io.load.fileBytes, (selected + 1) * document.fileBytes);
-    assert.equal(io.save.fileBytes, (selected + 1) * document.fileBytes);
+    assert.equal(io.evict.calls, 2 * selected); // consulted and verification caches
+    assert.equal(io.load.fileBytes, expectedIo.get(document.file).loadBytes);
+    assert.equal(io.save.fileBytes, expectedIo.get(document.file).saveBytes);
     const saved = JSON.parse(await readFile(document.filename, 'utf8'));
     assert.equal(saved.file, document.file);
     assert.equal(saved.database, document.database);
-    assert.equal(createHash('sha256').update(JSON.stringify(saved)).digest('hex'), document.sha256);
+    assert.equal(digest(saved), document.finalSha256);
+    assert.deepEqual(saved, expected.get(document.file));
   }
   for (let databaseIndex = 0; databaseIndex < databaseCount; databaseIndex++) {
     const name = `db${databaseIndex + 1}`;
     const files = report.documents.filter(document => document.database === name);
     const io = report.measurements.databases[name];
-    assert.equal(io.load.calls, files.length * (selected + 1));
+    assert.equal(io.load.calls, files.length * (2 * selected + 1));
     assert.equal(io.save.calls, files.length * (selected + 1));
     assert.equal(io.flush.calls, files.length * selected);
-    assert.equal(io.evict.calls, files.length * selected);
+    assert.equal(io.evict.calls, files.length * 2 * selected);
   }
   for (const result of report.queries.results) {
     assert.equal(result.status, 'passed');
@@ -61,6 +97,7 @@ async function verifyReport(report, { databaseCount, fileCount, records, section
       assert.deepEqual(new Set(result.persistence[field]), new Set(fileNames));
     }
     assert.deepEqual(new Set(result.usedFiles), new Set(fileNames));
+    assert.deepEqual(new Set(result.verification.verifiedFiles), new Set(fileNames));
   }
   const traversal = report.queries.traversal;
   assert.equal(traversal.steps,
@@ -88,7 +125,7 @@ async function verifyReport(report, { databaseCount, fileCount, records, section
   assert.deepEqual(JSON.parse(await readFile(report.reportPath, 'utf8')), report);
 }
 
-test('default 10 MiB files: all 205 queries save, flush and evict every used cache',
+test('default 10 MiB files: all 205 queries mutate, save, flush, evict and verify every shard',
   { timeout: 180_000 }, async t => {
     const outputDirectory = await mkdtemp(join(tmpdir(), 'lowdb-full-test-'));
     t.after(() => rm(outputDirectory, { recursive: true, force: true }));
@@ -123,6 +160,7 @@ test('CLI supports independent database/file counts and rejects invalid layouts'
     '--databases', '3', '--files', '5', '--read-concurrency', '2']);
   assert.match(stdout, /PASSED: 8\/8 sampled queries passed/);
   assert.match(stdout, /Errors: 0; pending races: 0/);
+  assert.match(stdout, /Mutations: 8; persisted matches: 8; verified mutations: 8/);
   await assert.rejects(exec(process.execPath, ['src/cli.js', '--sample-rate', '0']),
     error => error.code === 1 && /sampleRate/.test(error.stderr));
   await assert.rejects(exec(process.execPath, ['src/cli.js', '--databases', '3', '--files', '2']),
